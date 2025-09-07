@@ -1,0 +1,1355 @@
+'use client';
+
+import { useEffect, useRef, useState, useCallback } from 'react';
+import Image from 'next/image';
+import { Restaurant, restaurants } from '@/data/restaurants';
+import { Post, PostsResponse, BoardFilters } from '@/types/board';
+
+const categories = [
+  { name: '한식', emoji: '🍚' },
+  { name: '중식', emoji: '🥢' },
+  { name: '일식', emoji: '🍣' },
+  { name: '양식', emoji: '🍝' },
+  { name: '동남아', emoji: '🌶️' },
+  { name: '건강식', emoji: '🥗' },
+  { name: '회식', emoji: '🍻' }
+] as const;
+type Category = typeof categories[number]['name'];
+
+interface SuggestionResponse {
+  restaurant: Restaurant;
+  googleMapsUrl: string;
+}
+
+export default function Home() {
+  const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
+  const [suggestion, setSuggestion] = useState<SuggestionResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [currentView, setCurrentView] = useState<'home' | 'hamster' | 'restaurants' | 'board'>('home');
+  const [useWeighted, setUseWeighted] = useState<boolean>(true);
+  
+  // 채팅 상태 (햄스터 뷰)
+  interface ChatMessage {
+    role: 'user' | 'hamster';
+    text: string;
+  }
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
+    { role: 'hamster', text: '점심 드시러 가시죠!' }
+  ]);
+  const [chatInput, setChatInput] = useState<string>('뭐드실래요?');
+  
+  // 게시판 관련 state
+  const [posts, setPosts] = useState<Post[]>([]);
+  const [boardLoading, setBoardLoading] = useState(true);
+  const [newPost, setNewPost] = useState('');
+  const [newPostTitle, setNewPostTitle] = useState('');
+  const [newPostCategory, setNewPostCategory] = useState('일반');
+  const [submitting, setSubmitting] = useState(false);
+  const [selectedPost, setSelectedPost] = useState<Post | null>(null);
+  const [showPostForm, setShowPostForm] = useState(false);
+  const [editingPost, setEditingPost] = useState<Post | null>(null);
+  const [boardFilters, setBoardFilters] = useState<BoardFilters>({
+    search: '',
+    category: '',
+    sortBy: 'createdAt',
+    sortOrder: 'desc',
+    page: 1,
+    limit: 10
+  });
+  const [pagination, setPagination] = useState<any>(null);
+  const [newComment, setNewComment] = useState('');
+  const [commentSubmitting, setCommentSubmitting] = useState(false);
+  
+  // 식당 목록 필터 state
+  const [selectedFilterCategory, setSelectedFilterCategory] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    // 새로운 메시지가 추가될 때 하단으로 스크롤
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [chatMessages]);
+
+  const getRandomSpecialtyItem = (): string => {
+    // 무작위 식당 선택 후 대표메뉴 문자열에서 아이템 하나 선택
+    const randomRestaurant = restaurants[Math.floor(Math.random() * restaurants.length)];
+    const items = randomRestaurant.specialty
+      .split(',')
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+    if (items.length === 0) return randomRestaurant.specialty;
+    return items[Math.floor(Math.random() * items.length)];
+  };
+
+  const handleChatSend = () => {
+    const trimmed = chatInput.trim();
+    if (!trimmed) return;
+    // 사용자 메시지 추가
+    setChatMessages((prev) => [...prev, { role: 'user', text: trimmed }]);
+    setChatInput('');
+    // 햄스터 응답 (약간의 지연 후)
+    setTimeout(() => {
+      const answer = getRandomSpecialtyItem();
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'hamster', text: `오늘은 ${answer} 어떠세요?` }
+      ]);
+    }, 500);
+  };
+
+  const handleSuggest = async () => {
+    if (!selectedCategory) {
+      setError('카테고리를 선택해주세요.');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/suggest?category=${selectedCategory}&weighted=${useWeighted}`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || '추천을 가져오는데 실패했습니다.');
+      }
+
+      setSuggestion(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '알 수 없는 오류가 발생했습니다.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getSpecialtyColor = (category: string) => {
+    switch (category) {
+      case '한식':
+        return 'text-red-600 bg-red-100';
+      case '중식':
+        return 'text-orange-600 bg-orange-100';
+      case '일식':
+        return 'text-blue-600 bg-blue-100';
+      case '양식':
+        return 'text-purple-600 bg-purple-100';
+      case '동남아':
+        return 'text-green-600 bg-green-100';
+      case '건강식':
+        return 'text-emerald-600 bg-emerald-100';
+      case '회식':
+        return 'text-pink-600 bg-pink-100';
+      default:
+        return 'text-gray-600 bg-gray-100';
+    }
+  };
+
+  const fetchPosts = useCallback(async () => {
+    setBoardLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page: boardFilters.page.toString(),
+        limit: boardFilters.limit.toString(),
+        search: boardFilters.search,
+        category: boardFilters.category,
+        sortBy: boardFilters.sortBy,
+        sortOrder: boardFilters.sortOrder
+      });
+
+      const response = await fetch(`/api/posts?${params}`);
+      const data: PostsResponse = await response.json();
+      
+      if (response.ok) {
+        setPosts(data.posts);
+        setPagination(data.pagination);
+      } else {
+        console.error('게시글을 불러오는데 실패했습니다:', data.error);
+      }
+    } catch (error) {
+      console.error('게시글을 불러오는데 실패했습니다:', error);
+    } finally {
+      setBoardLoading(false);
+    }
+  }, [boardFilters.page, boardFilters.limit, boardFilters.search, boardFilters.category, boardFilters.sortBy, boardFilters.sortOrder]);
+
+  const renderHomeView = () => (
+    <>
+      {/* 카테고리 선택 */}
+      <div className="max-w-6xl mx-auto mb-8 sm:mb-12">
+        <div className="text-center mb-8 sm:mb-10">
+          <h2 className="text-xl sm:text-2xl md:text-3xl font-bold text-slate-800 mb-3">
+            카테고리를 선택해주세요
+          </h2>
+          <p className="text-sm sm:text-base text-slate-600 max-w-2xl mx-auto">
+            원하는 음식 종류를 선택하면 맞춤 추천을 받을 수 있습니다
+          </p>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3 sm:gap-4">
+          {categories.map((category) => (
+            <button
+              key={category.name}
+              onClick={() => setSelectedCategory(category.name)}
+              className={`group relative p-4 sm:p-5 rounded-2xl font-semibold transition-all duration-300 transform hover:scale-105 ${
+                selectedCategory === category.name
+                  ? 'bg-blue-600 text-white shadow-xl shadow-blue-500/25 scale-105'
+                  : 'bg-white/80 backdrop-blur-sm text-slate-700 hover:bg-white hover:shadow-lg border border-white/20 hover:bg-blue-50'
+              }`}
+            >
+              <div className="flex flex-col items-center space-y-2">
+                <div className={`text-2xl sm:text-3xl transition-transform duration-300 ${
+                  selectedCategory === category.name ? 'scale-110' : 'group-hover:scale-110'
+                }`}>
+                  {category.emoji}
+                </div>
+                <div className="text-xs sm:text-sm font-medium leading-tight">
+                  {category.name}
+                </div>
+              </div>
+              {selectedCategory === category.name && (
+                <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-blue-400/20 to-indigo-500/20 animate-pulse"></div>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 추천 버튼 */}
+      <div className="text-center mb-8 sm:mb-12">
+        <div className="flex items-center justify-center gap-3 mb-4">
+          <label className="flex items-center gap-2 text-sm sm:text-base text-slate-700 bg-white/70 px-3 py-2 rounded-xl border border-white/40 shadow-sm">
+            <input type="checkbox" checked={useWeighted} onChange={(e) => setUseWeighted(e.target.checked)} className="accent-blue-600 w-4 h-4" />
+            <span>최근 추천 가중치 적용</span>
+          </label>
+        </div>
+        <button
+          onClick={handleSuggest}
+          disabled={loading || !selectedCategory}
+          className={`group relative px-8 sm:px-12 py-4 sm:py-5 rounded-2xl font-bold text-base sm:text-lg transition-all duration-300 transform ${
+            loading || !selectedCategory
+              ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+              : 'bg-blue-600 text-white hover:bg-blue-700 shadow-xl hover:shadow-2xl hover:scale-105 active:scale-95'
+          }`}
+        >
+          <div className="flex items-center justify-center gap-3">
+            {loading ? (
+              <>
+                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                <span>추천 중...</span>
+              </>
+            ) : (
+              <>
+                <span>🍽️</span>
+                <span>오늘 뭐 먹지?</span>
+                <svg className="w-5 h-5 group-hover:translate-x-1 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                </svg>
+              </>
+            )}
+          </div>
+          {!loading && selectedCategory && (
+            <div className="absolute inset-0 rounded-2xl bg-gradient-to-r from-blue-400/20 via-indigo-400/20 to-purple-400/20 animate-pulse"></div>
+          )}
+        </button>
+      </div>
+
+      {/* 에러 메시지 */}
+      {error && (
+        <div className="max-w-md mx-auto mb-6 p-4 sm:p-5 bg-red-50/80 backdrop-blur-sm border border-red-200 text-red-700 rounded-2xl text-center shadow-lg">
+          <div className="flex items-center justify-center gap-2">
+            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+            </svg>
+            {error}
+          </div>
+        </div>
+      )}
+
+      {/* 추천 결과 */}
+      {suggestion && (
+        <div className="max-w-lg mx-auto">
+          <div className="bg-white/90 backdrop-blur-sm rounded-3xl shadow-2xl p-6 sm:p-8 transform transition-all duration-500 hover:scale-105 border border-white/20">
+            <div className="text-center">
+              <div className="mb-6">
+                <h3 className="text-xl sm:text-2xl font-bold text-slate-800 mb-3 leading-tight">
+                  {suggestion.restaurant.name}
+                </h3>
+                <div className="flex flex-wrap justify-center items-center gap-2 mb-4">
+                  <span className="px-3 py-1.5 rounded-full text-xs sm:text-sm font-semibold bg-gradient-to-r from-blue-100 to-indigo-100 text-blue-800 border border-blue-200">
+                    {suggestion.restaurant.category}
+                  </span>
+                  <span className={`px-3 py-1.5 rounded-full text-xs sm:text-sm font-semibold ${getSpecialtyColor(suggestion.restaurant.category)} border`}>
+                    대표메뉴
+                  </span>
+                </div>
+                <div className="text-sm sm:text-base text-slate-600 leading-relaxed bg-slate-50 rounded-xl p-4 border border-slate-100">
+                  {suggestion.restaurant.specialty}
+                </div>
+              </div>
+              <a
+                href={suggestion.googleMapsUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+                className="group inline-flex items-center gap-3 px-6 sm:px-8 py-3 sm:py-4 bg-blue-600 text-white rounded-2xl hover:bg-blue-700 transition-all duration-300 font-semibold shadow-lg hover:shadow-xl transform hover:scale-105"
+              >
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+                </svg>
+                <span>Google Maps에서 보기</span>
+                <svg className="w-4 h-4 group-hover:translate-x-1 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                </svg>
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 다시 추천받기 버튼 */}
+      {suggestion && (
+        <div className="text-center mt-8">
+          <button
+            onClick={() => {
+              setSuggestion(null);
+              setError(null);
+            }}
+            className="px-6 py-3 text-slate-600 hover:text-slate-800 transition-all duration-300 font-medium hover:bg-white/50 rounded-xl backdrop-blur-sm"
+          >
+            다른 추천 받기
+          </button>
+        </div>
+      )}
+    </>
+  );
+
+  const renderHamsterView = () => (
+    <div className="max-w-4xl mx-auto">
+      <div className="bg-white/90 backdrop-blur-sm rounded-3xl shadow-2xl p-6 sm:p-8 lg:p-12 border border-white/20">
+        {/* 카카오톡 스타일 채팅 UI */}
+        <div className="flex flex-col h-[620px] max-h-[75vh] bg-sky-50 rounded-2xl border border-sky-100 shadow-inner overflow-hidden">
+          {/* 상단 영역 */}
+          <div className="px-4 py-4 bg-white/80 border-b border-white/60 flex items-center gap-3">
+            <div className="font-extrabold text-slate-800 text-xl sm:text-2xl">햄스터 주임</div>
+            <div className="ml-auto text-xs sm:text-sm text-slate-500">상담 중</div>
+          </div>
+          {/* 메시지 리스트 */}
+          <div className="flex-1 p-5 sm:p-6 overflow-y-auto space-y-5">
+            {chatMessages.map((msg, idx) => (
+              <div key={idx} className={`flex items-end gap-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                {msg.role === 'hamster' && (
+                  <div className="relative w-16 h-16 sm:w-20 sm:h-20 rounded-full overflow-hidden ring-2 ring-white/70 shadow flex-shrink-0">
+                    <Image src="/a2.png" alt="햄스터 주임" fill className="object-cover" />
+                  </div>
+                )}
+                <div className={`relative max-w-[78%] sm:max-w-[74%] rounded-2xl px-6 py-4 text-lg sm:text-xl leading-relaxed shadow ${
+                  msg.role === 'user'
+                    ? 'bg-yellow-300 text-slate-900 rounded-br-sm'
+                    : 'bg-white text-slate-800 border border-slate-200 rounded-bl-sm'
+                }`}>
+                  {msg.text}
+                  {msg.role === 'hamster' ? (
+                    <span className="absolute -left-1.5 bottom-3 w-3 h-3 bg-white border-l border-b border-slate-200 rotate-45"></span>
+                  ) : (
+                    <span className="absolute -right-1.5 bottom-3 w-3 h-3 bg-yellow-300 rotate-45"></span>
+                  )}
+                </div>
+                {msg.role === 'user' && (
+                  <div className="relative w-12 h-12 sm:w-14 sm:h-14 rounded-full overflow-hidden ring-2 ring-white/70 shadow flex-shrink-0">
+                    <Image src="/a1.png" alt="나" fill className="object-cover" />
+                  </div>
+                )}
+              </div>
+            ))}
+            <div ref={chatEndRef} />
+          </div>
+          {/* 입력 영역 */}
+          <div className="p-3 bg-white/80 border-t border-white/60">
+            <div className="flex items-center gap-2">
+              <input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleChatSend(); }}
+                placeholder="메시지를 입력하세요"
+                className="flex-1 px-4 py-3 rounded-xl bg-white border border-slate-200 text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-200"
+              />
+              <button
+                onClick={handleChatSend}
+                className="px-5 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors shadow"
+              >
+                Send
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  // 필터링된 식당 목록 계산
+  const filteredRestaurants = restaurants.filter(restaurant => {
+    const matchesCategory = !selectedFilterCategory || restaurant.category === selectedFilterCategory;
+    const matchesSearch = !searchQuery || 
+      restaurant.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      restaurant.specialty.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      restaurant.address.toLowerCase().includes(searchQuery.toLowerCase());
+    return matchesCategory && matchesSearch;
+  });
+
+  const renderRestaurantsView = () => (
+    <div className="max-w-7xl mx-auto">
+      <div className="text-center mb-8 sm:mb-12">
+        <h2 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-slate-800 mb-4">
+          전체 식당 목록
+        </h2>
+        <p className="text-slate-600 text-sm sm:text-base max-w-2xl mx-auto">
+          상암동의 모든 맛집을 한눈에 확인하고 원하는 곳을 찾아보세요
+        </p>
+      </div>
+
+      {/* 카테고리 선택 */}
+      <div className="max-w-6xl mx-auto mb-8 sm:mb-12">
+        <div className="text-center mb-8 sm:mb-10">
+          <h2 className="text-xl sm:text-2xl md:text-3xl font-bold text-slate-800 mb-3">
+            카테고리를 선택해주세요
+          </h2>
+          <p className="text-sm sm:text-base text-slate-600 max-w-2xl mx-auto">
+            원하는 음식 종류를 선택하면 해당 카테고리의 식당들을 볼 수 있습니다
+          </p>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3 sm:gap-4">
+          {/* 전체 버튼 */}
+          <button
+            onClick={() => setSelectedFilterCategory(null)}
+            className={`group relative p-4 sm:p-5 rounded-2xl font-semibold transition-all duration-300 transform hover:scale-105 ${
+              !selectedFilterCategory
+                ? 'bg-blue-600 text-white shadow-xl shadow-blue-500/25 scale-105'
+                : 'bg-white/80 backdrop-blur-sm text-slate-700 hover:bg-white hover:shadow-lg border border-white/20 hover:bg-blue-50'
+            }`}
+          >
+            <div className="flex flex-col items-center space-y-2">
+              <div className={`text-2xl sm:text-3xl transition-transform duration-300 ${
+                !selectedFilterCategory ? 'scale-110' : 'group-hover:scale-110'
+              }`}>
+                🍽️
+              </div>
+              <div className="text-xs sm:text-sm font-medium leading-tight">
+                전체
+              </div>
+            </div>
+            {!selectedFilterCategory && (
+              <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-blue-400/20 to-indigo-500/20 animate-pulse"></div>
+            )}
+          </button>
+          
+          {/* 카테고리 버튼들 */}
+          {categories.map((category) => (
+            <button
+              key={category.name}
+              onClick={() => setSelectedFilterCategory(category.name)}
+              className={`group relative p-4 sm:p-5 rounded-2xl font-semibold transition-all duration-300 transform hover:scale-105 ${
+                selectedFilterCategory === category.name
+                  ? 'bg-blue-600 text-white shadow-xl shadow-blue-500/25 scale-105'
+                  : 'bg-white/80 backdrop-blur-sm text-slate-700 hover:bg-white hover:shadow-lg border border-white/20 hover:bg-blue-50'
+              }`}
+            >
+              <div className="flex flex-col items-center space-y-2">
+                <div className={`text-2xl sm:text-3xl transition-transform duration-300 ${
+                  selectedFilterCategory === category.name ? 'scale-110' : 'group-hover:scale-110'
+                }`}>
+                  {category.emoji}
+                </div>
+                <div className="text-xs sm:text-sm font-medium leading-tight">
+                  {category.name}
+                </div>
+              </div>
+              {selectedFilterCategory === category.name && (
+                <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-blue-400/20 to-indigo-500/20 animate-pulse"></div>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 검색 */}
+      <div className="bg-white/90 backdrop-blur-sm rounded-2xl shadow-lg p-6 mb-8 border border-white/20">
+        <div className="flex flex-col lg:flex-row gap-4">
+          <div className="flex-1">
+            <label className="block text-sm font-semibold text-slate-700 mb-2">검색</label>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="식당명, 메뉴, 주소로 검색..."
+              className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800"
+            />
+          </div>
+        </div>
+        
+        {/* 결과 개수 */}
+        <div className="mt-4 text-center">
+          <span className="text-slate-600">
+            총 <span className="font-bold text-blue-600">{filteredRestaurants.length}</span>개의 식당이 있습니다
+          </span>
+        </div>
+      </div>
+
+      {/* 식당 목록 */}
+      {filteredRestaurants.length === 0 ? (
+        <div className="text-center py-12">
+          <div className="text-6xl mb-4">🔍</div>
+          <h3 className="text-xl font-semibold text-slate-700 mb-2">검색 결과가 없습니다</h3>
+          <p className="text-slate-500">다른 검색어나 카테고리를 시도해보세요</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-6">
+          {filteredRestaurants.map((restaurant) => (
+            <div key={restaurant.id} className="group bg-white/90 backdrop-blur-sm rounded-2xl shadow-lg hover:shadow-2xl p-5 sm:p-6 transition-all duration-300 transform hover:scale-105 border border-white/20">
+              <div className="mb-4">
+                <h3 className="text-lg sm:text-xl font-bold text-slate-800 mb-3 leading-tight group-hover:text-blue-600 transition-colors duration-300">
+                  {restaurant.name}
+                </h3>
+                <div className="flex flex-wrap items-center gap-2 mb-3">
+                  <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-gradient-to-r from-blue-100 to-indigo-100 text-blue-800 border border-blue-200">
+                    {restaurant.category}
+                  </span>
+                  <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${getSpecialtyColor(restaurant.category)} border`}>
+                    대표메뉴
+                  </span>
+                </div>
+                <div className="text-sm text-slate-600 leading-relaxed bg-slate-50 rounded-xl p-3 border border-slate-100">
+                  {restaurant.specialty}
+                </div>
+              </div>
+              <a
+                href={`https://www.google.com/maps/search/${encodeURIComponent(restaurant.searchQuery)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+                className="group/link inline-flex items-center gap-2 text-blue-600 hover:text-blue-700 text-sm font-medium transition-colors duration-300"
+              >
+                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+                </svg>
+                <span>위치 보기</span>
+                <svg className="w-3 h-3 group-hover/link:translate-x-1 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                </svg>
+              </a>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  // 게시글 목록 불러오기
+  useEffect(() => {
+    if (currentView === 'board') {
+      fetchPosts();
+    }
+  }, [currentView, fetchPosts]);
+
+  // 새 글 작성 함수
+  const handleSubmitPost = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newPostTitle.trim() || !newPost.trim() || submitting) return;
+
+    setSubmitting(true);
+    try {
+      const response = await fetch('/api/posts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          title: newPostTitle,
+          content: newPost,
+          category: newPostCategory,
+          author: '익명'
+        })
+      });
+
+      if (response.ok) {
+        const createdPost = await response.json();
+        setNewPostTitle('');
+        setNewPost('');
+        setNewPostCategory('일반');
+        setShowPostForm(false);
+        fetchPosts(); // 목록 새로고침
+      } else {
+        const errorData = await response.json();
+        alert(errorData.error || '게시글 작성에 실패했습니다.');
+      }
+    } catch (error) {
+      console.error('게시글 작성에 실패했습니다:', error);
+      alert('게시글 작성에 실패했습니다.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // 게시글 수정 함수
+  const handleEditPost = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingPost || submitting) return;
+
+    setSubmitting(true);
+    try {
+      const response = await fetch(`/api/posts/${editingPost.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          title: editingPost.title,
+          content: editingPost.content,
+          category: editingPost.category,
+          author: editingPost.author
+        })
+      });
+
+      if (response.ok) {
+        setEditingPost(null);
+        fetchPosts(); // 목록 새로고침
+        if (selectedPost) {
+          // 상세보기에서 수정한 경우 상세보기도 새로고침
+          fetchPostDetail(editingPost.id);
+        }
+      } else {
+        const errorData = await response.json();
+        alert(errorData.error || '게시글 수정에 실패했습니다.');
+      }
+    } catch (error) {
+      console.error('게시글 수정에 실패했습니다:', error);
+      alert('게시글 수정에 실패했습니다.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // 게시글 삭제 함수
+  const handleDeletePost = async (postId: number) => {
+    if (!confirm('정말로 이 게시글을 삭제하시겠습니까?')) return;
+
+    try {
+      const response = await fetch(`/api/posts/${postId}`, {
+        method: 'DELETE'
+      });
+
+      if (response.ok) {
+        setSelectedPost(null);
+        fetchPosts(); // 목록 새로고침
+      } else {
+        const errorData = await response.json();
+        alert(errorData.error || '게시글 삭제에 실패했습니다.');
+      }
+    } catch (error) {
+      console.error('게시글 삭제에 실패했습니다:', error);
+      alert('게시글 삭제에 실패했습니다.');
+    }
+  };
+
+  // 게시글 상세 조회
+  const fetchPostDetail = async (postId: number) => {
+    try {
+      const response = await fetch(`/api/posts/${postId}`);
+      if (response.ok) {
+        const post = await response.json();
+        setSelectedPost(post);
+      } else {
+        alert('게시글을 불러올 수 없습니다.');
+      }
+    } catch (error) {
+      console.error('게시글 조회에 실패했습니다:', error);
+      alert('게시글 조회에 실패했습니다.');
+    }
+  };
+
+  // 댓글 작성
+  const handleSubmitComment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newComment.trim() || !selectedPost || commentSubmitting) return;
+
+    setCommentSubmitting(true);
+    try {
+      const response = await fetch(`/api/posts/${selectedPost.id}/comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          content: newComment,
+          author: '익명'
+        })
+      });
+
+      if (response.ok) {
+        const newCommentData = await response.json();
+        setSelectedPost({
+          ...selectedPost,
+          comments: [...selectedPost.comments, newCommentData]
+        });
+        setNewComment('');
+        fetchPosts(); // 목록의 댓글 수도 업데이트
+      } else {
+        const errorData = await response.json();
+        alert(errorData.error || '댓글 작성에 실패했습니다.');
+      }
+    } catch (error) {
+      console.error('댓글 작성에 실패했습니다:', error);
+      alert('댓글 작성에 실패했습니다.');
+    } finally {
+      setCommentSubmitting(false);
+    }
+  };
+
+  // 좋아요 토글
+  const handleLikePost = async (postId: number) => {
+    try {
+      const response = await fetch(`/api/posts/${postId}/like`, {
+        method: 'POST'
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        // 목록의 좋아요 수 업데이트
+        setPosts(posts.map(post => 
+          post.id === postId ? { ...post, likes: data.likes } : post
+        ));
+        // 상세보기의 좋아요 수 업데이트
+        if (selectedPost && selectedPost.id === postId) {
+          setSelectedPost({ ...selectedPost, likes: data.likes });
+        }
+      }
+    } catch (error) {
+      console.error('좋아요 처리에 실패했습니다:', error);
+    }
+  };
+
+  // 필터 변경
+  const handleFilterChange = (key: string, value: any) => {
+    setBoardFilters(prev => ({
+      ...prev,
+      [key]: value,
+      page: 1 // 필터 변경 시 첫 페이지로
+    }));
+  };
+
+  // 게시글 상세보기 컴포넌트
+  const PostDetailView = () => {
+    if (!selectedPost) return null;
+    
+    return (
+        <div className="max-w-4xl mx-auto">
+          {/* 뒤로가기 버튼 */}
+          <div className="mb-6">
+            <button
+              onClick={() => setSelectedPost(null)}
+              className="flex items-center gap-2 px-4 py-2 text-slate-600 hover:text-slate-800 hover:bg-white/50 rounded-xl transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+              목록으로 돌아가기
+            </button>
+          </div>
+
+          {/* 게시글 상세 */}
+          <div className="bg-white/90 backdrop-blur-sm rounded-3xl shadow-2xl p-6 sm:p-8 border border-white/20 mb-6">
+            <div className="mb-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
+                    <span className="text-blue-600 font-bold text-lg">익</span>
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-800">{selectedPost.author}</div>
+                    <div className="text-sm text-slate-500">{selectedPost.date} {selectedPost.time}</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm font-medium">
+                    {selectedPost.category}
+                  </span>
+                  <button
+                    onClick={() => setEditingPost(selectedPost)}
+                    className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={() => handleDeletePost(selectedPost.id)}
+                    className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              
+              <h1 className="text-2xl sm:text-3xl font-bold text-slate-800 mb-4 leading-tight">
+                {selectedPost.title}
+              </h1>
+              
+              <div className="prose max-w-none text-slate-700 leading-relaxed whitespace-pre-wrap">
+                {selectedPost.content}
+              </div>
+            </div>
+
+            {/* 통계 */}
+            <div className="flex items-center gap-6 py-4 border-t border-slate-200">
+              <div className="flex items-center gap-2 text-slate-600">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                </svg>
+                <span>{selectedPost.views} 조회</span>
+              </div>
+              <button
+                onClick={() => handleLikePost(selectedPost.id)}
+                className="flex items-center gap-2 text-slate-600 hover:text-red-500 transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+                </svg>
+                <span>{selectedPost.likes} 좋아요</span>
+              </button>
+              <div className="flex items-center gap-2 text-slate-600">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                </svg>
+                <span>{selectedPost.comments?.length || 0} 댓글</span>
+              </div>
+            </div>
+          </div>
+
+          {/* 댓글 섹션 */}
+          <div className="bg-white/90 backdrop-blur-sm rounded-3xl shadow-2xl p-6 border border-white/20">
+            <h3 className="text-xl font-bold text-slate-800 mb-6">댓글</h3>
+            
+            {/* 댓글 작성 */}
+            <form onSubmit={handleSubmitComment} className="mb-6">
+              <div className="flex gap-3">
+                <input
+                  type="text"
+                  value={newComment}
+                  onChange={(e) => setNewComment(e.target.value)}
+                  placeholder="댓글을 작성해주세요..."
+                  className="flex-1 px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800"
+                  disabled={commentSubmitting}
+                />
+                <button
+                  type="submit"
+                  disabled={commentSubmitting || !newComment.trim()}
+                  className="px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {commentSubmitting ? '작성중...' : '작성'}
+                </button>
+              </div>
+            </form>
+
+            {/* 댓글 목록 */}
+            <div className="space-y-4">
+              {selectedPost.comments?.map((comment) => (
+                <div key={comment.id} className="flex items-start gap-3 p-4 bg-slate-50 rounded-xl">
+                  <div className="w-8 h-8 bg-slate-200 rounded-full flex items-center justify-center flex-shrink-0">
+                    <span className="text-slate-600 font-bold text-sm">익</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-medium text-slate-800">{comment.author}</span>
+                      <span className="text-sm text-slate-500">
+                        {new Date(comment.createdAt).toLocaleDateString('ko-KR')} {new Date(comment.createdAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+                    <p className="text-slate-700 leading-relaxed">{comment.content}</p>
+                  </div>
+                </div>
+              ))}
+              {(!selectedPost.comments || selectedPost.comments.length === 0) && (
+                <div className="text-center py-8 text-slate-500">
+                  아직 댓글이 없습니다. 첫 번째 댓글을 작성해보세요!
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+  };
+
+  // 게시글 수정 컴포넌트
+  const PostEditView = () => {
+    if (!editingPost) return null;
+    
+    return (
+        <div className="max-w-4xl mx-auto">
+          <div className="mb-6">
+            <button
+              onClick={() => setEditingPost(null)}
+              className="flex items-center gap-2 px-4 py-2 text-slate-600 hover:text-slate-800 hover:bg-white/50 rounded-xl transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+              취소
+            </button>
+          </div>
+
+          <div className="bg-white/90 backdrop-blur-sm rounded-3xl shadow-2xl p-6 sm:p-8 border border-white/20">
+            <h2 className="text-2xl font-bold text-slate-800 mb-6">게시글 수정</h2>
+            
+            <form onSubmit={handleEditPost} className="space-y-6">
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-2">제목</label>
+                <input
+                  type="text"
+                  value={editingPost.title}
+                  onChange={(e) => setEditingPost({...editingPost, title: e.target.value})}
+                  className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800"
+                  placeholder="제목을 입력하세요"
+                  maxLength={100}
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-2">카테고리</label>
+                <select
+                  value={editingPost.category}
+                  onChange={(e) => setEditingPost({...editingPost, category: e.target.value})}
+                  className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800"
+                >
+                  <option value="일반">일반</option>
+                  <option value="맛집추천">맛집추천</option>
+                  <option value="후기">후기</option>
+                  <option value="질문">질문</option>
+                  <option value="공지">공지</option>
+                </select>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-2">내용</label>
+                <textarea
+                  value={editingPost.content}
+                  onChange={(e) => setEditingPost({...editingPost, content: e.target.value})}
+                  className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800 h-64 resize-none"
+                  placeholder="내용을 입력하세요"
+                  maxLength={2000}
+                />
+                <div className="text-right text-sm text-slate-500 mt-1">
+                  {editingPost.content.length}/2000
+                </div>
+              </div>
+              
+              <div className="flex gap-3">
+                <button
+                  type="submit"
+                  disabled={submitting || !editingPost.title.trim() || !editingPost.content.trim()}
+                  className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {submitting ? '수정중...' : '수정하기'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingPost(null)}
+                  className="px-6 py-3 bg-slate-200 text-slate-700 rounded-xl hover:bg-slate-300 transition-colors font-semibold"
+                >
+                  취소
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+  };
+
+  // 게시판 목록 컴포넌트
+  const BoardListView = () => {
+    return (
+      <div className="max-w-6xl mx-auto">
+        <div className="text-center mb-8">
+          <h2 className="text-3xl font-bold text-slate-800 mb-4">게시판</h2>
+          <p className="text-slate-600">상암동 맛집에 대한 정보를 공유하고 소통해보세요</p>
+        </div>
+
+        {/* 필터 및 검색 */}
+        <div className="bg-white/90 backdrop-blur-sm rounded-2xl shadow-lg p-6 mb-6 border border-white/20">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-2">검색</label>
+              <input
+                type="text"
+                value={boardFilters.search}
+                onChange={(e) => handleFilterChange('search', e.target.value)}
+                placeholder="제목, 내용, 작성자로 검색..."
+                className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800"
+              />
+            </div>
+            
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-2">카테고리</label>
+              <select
+                value={boardFilters.category}
+                onChange={(e) => handleFilterChange('category', e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800"
+              >
+                <option value="">전체</option>
+                <option value="일반">일반</option>
+                <option value="맛집추천">맛집추천</option>
+                <option value="후기">후기</option>
+                <option value="질문">질문</option>
+                <option value="공지">공지</option>
+              </select>
+            </div>
+            
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-2">정렬</label>
+              <select
+                value={`${boardFilters.sortBy}-${boardFilters.sortOrder}`}
+                onChange={(e) => {
+                  const [sortBy, sortOrder] = e.target.value.split('-');
+                  handleFilterChange('sortBy', sortBy);
+                  handleFilterChange('sortOrder', sortOrder);
+                }}
+                className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800"
+              >
+                <option value="createdAt-desc">최신순</option>
+                <option value="createdAt-asc">오래된순</option>
+                <option value="views-desc">조회수 높은순</option>
+                <option value="likes-desc">좋아요 많은순</option>
+                <option value="title-asc">제목순</option>
+              </select>
+            </div>
+            
+            <div className="flex items-end">
+              <button
+                onClick={() => setShowPostForm(true)}
+                className="w-full px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-semibold"
+              >
+                새 글 작성
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* 새 글 작성 폼 */}
+        {showPostForm && (
+          <div className="bg-white/90 backdrop-blur-sm rounded-3xl shadow-2xl p-6 sm:p-8 border border-white/20 mb-6">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-xl font-bold text-slate-800">새 글 작성</h3>
+              <button
+                onClick={() => {
+                  setShowPostForm(false);
+                  setNewPostTitle('');
+                  setNewPost('');
+                  setNewPostCategory('일반');
+                }}
+                className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            
+            <form onSubmit={handleSubmitPost} className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-2">제목</label>
+                  <input
+                    type="text"
+                    value={newPostTitle}
+                    onChange={(e) => setNewPostTitle(e.target.value)}
+                    placeholder="제목을 입력하세요"
+                    className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800"
+                    maxLength={100}
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-2">카테고리</label>
+                  <select
+                    value={newPostCategory}
+                    onChange={(e) => setNewPostCategory(e.target.value)}
+                    className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800"
+                  >
+                    <option value="일반">일반</option>
+                    <option value="맛집추천">맛집추천</option>
+                    <option value="후기">후기</option>
+                    <option value="질문">질문</option>
+                    <option value="공지">공지</option>
+                  </select>
+                </div>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-2">내용</label>
+                <textarea
+                  value={newPost}
+                  onChange={(e) => setNewPost(e.target.value)}
+                  placeholder="내용을 입력하세요"
+                  className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800 h-32 resize-none"
+                  maxLength={2000}
+                />
+                <div className="text-right text-sm text-slate-500 mt-1">
+                  {newPost.length}/2000
+                </div>
+              </div>
+              
+              <div className="flex gap-3">
+                <button
+                  type="submit"
+                  disabled={submitting || !newPostTitle.trim() || !newPost.trim()}
+                  className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {submitting ? '작성중...' : '작성하기'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPostForm(false);
+                    setNewPostTitle('');
+                    setNewPost('');
+                    setNewPostCategory('일반');
+                  }}
+                  className="px-6 py-3 bg-slate-200 text-slate-700 rounded-xl hover:bg-slate-300 transition-colors font-semibold"
+                >
+                  취소
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {/* 게시글 목록 */}
+        {boardLoading ? (
+          <div className="text-center py-12">
+            <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+            <p className="text-slate-600">게시글을 불러오는 중...</p>
+          </div>
+        ) : (
+          <>
+            <div className="space-y-4">
+              {posts.map((post: Post) => (
+                <div key={post.id} className="bg-white/90 backdrop-blur-sm rounded-2xl shadow-lg hover:shadow-xl p-6 border border-white/20 transition-all duration-300 hover:scale-[1.02]">
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center flex-shrink-0">
+                        <span className="text-blue-600 font-bold text-sm">익</span>
+                      </div>
+                      <div>
+                        <div className="font-semibold text-slate-800">{post.author}</div>
+                        <div className="text-sm text-slate-500">{post.date} {post.time}</div>
+                      </div>
+                    </div>
+                    <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm font-medium">
+                      {post.category}
+                    </span>
+                  </div>
+                  
+                  <h3 
+                    className="text-lg font-bold text-slate-800 mb-3 cursor-pointer hover:text-blue-600 transition-colors"
+                    onClick={() => fetchPostDetail(post.id)}
+                  >
+                    {post.title}
+                  </h3>
+                  
+                  <p className="text-slate-600 mb-4 line-clamp-2">
+                    {post.content}
+                  </p>
+                  
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-4 text-sm text-slate-500">
+                      <div className="flex items-center gap-1">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                        </svg>
+                        {post.views}
+                      </div>
+                      <button
+                        onClick={() => handleLikePost(post.id)}
+                        className="flex items-center gap-1 hover:text-red-500 transition-colors"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+                        </svg>
+                        {post.likes}
+                      </button>
+                      <div className="flex items-center gap-1">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                        </svg>
+                        {post.comments?.length || 0}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => fetchPostDetail(post.id)}
+                      className="text-blue-600 hover:text-blue-700 font-medium text-sm"
+                    >
+                      자세히 보기 →
+                    </button>
+                  </div>
+                </div>
+              ))}
+              
+              {posts.length === 0 && (
+                <div className="text-center py-12">
+                  <div className="text-6xl mb-4">📝</div>
+                  <h3 className="text-xl font-semibold text-slate-700 mb-2">게시글이 없습니다</h3>
+                  <p className="text-slate-500 mb-6">첫 번째 글을 작성해보세요!</p>
+                  <button
+                    onClick={() => setShowPostForm(true)}
+                    className="px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-semibold"
+                  >
+                    글 작성하기
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* 페이지네이션 */}
+            {pagination && pagination.totalPages > 1 && (
+              <div className="flex items-center justify-center gap-2 mt-8">
+                <button
+                  onClick={() => handleFilterChange('page', pagination.currentPage - 1)}
+                  disabled={!pagination.hasPrev}
+                  className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  이전
+                </button>
+                
+                <div className="flex items-center gap-1">
+                  {Array.from({ length: Math.min(5, pagination.totalPages) }, (_, i) => {
+                    const page = i + 1;
+                    return (
+                      <button
+                        key={page}
+                        onClick={() => handleFilterChange('page', page)}
+                        className={`px-4 py-2 rounded-xl transition-colors ${
+                          page === pagination.currentPage
+                            ? 'bg-blue-600 text-white'
+                            : 'border border-slate-300 text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        {page}
+                      </button>
+                    );
+                  })}
+                </div>
+                
+                <button
+                  onClick={() => handleFilterChange('page', pagination.currentPage + 1)}
+                  disabled={!pagination.hasNext}
+                  className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  다음
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
+
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100">
+      <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+        {/* 헤더 */}
+        <div className="relative mb-8 sm:mb-12">
+          <div className="text-center">
+            <div className="inline-block">
+              <h1 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-black mb-2 sm:mb-4 leading-tight">
+                <span className="text-2xl sm:text-3xl md:text-4xl lg:text-5xl bg-gradient-to-r from-slate-600 via-slate-700 to-slate-800 bg-clip-text text-transparent">
+                  SANGAM-DONG
+                </span>
+                <br />
+                <span className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 bg-clip-text text-transparent animate-gradient bg-[length:200%_200%]">
+                  LUNCH PICK
+                </span>
+              </h1>
+              <div className="w-24 sm:w-32 h-1 bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 mx-auto rounded-full mb-4 animate-gradient bg-[length:200%_200%]"></div>
+            </div>
+            <p className="text-sm sm:text-base md:text-lg text-slate-600 font-medium max-w-2xl mx-auto leading-relaxed">
+              상암동 직장인을 위한 점심 메뉴 추천 서비스
+            </p>
+          </div>
+
+          {/* 햄버거 메뉴 */}
+          <div className="absolute top-0 right-0">
+            <button
+              onClick={() => setIsMenuOpen(!isMenuOpen)}
+              className="p-3 rounded-2xl bg-white/80 backdrop-blur-sm shadow-lg hover:shadow-xl transition-all duration-300 hover:scale-105 border border-white/20"
+            >
+              <svg className="w-5 h-5 sm:w-6 sm:h-6 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+
+            {/* 드롭다운 메뉴 */}
+            {isMenuOpen && (
+              <div className="absolute right-0 mt-3 w-56 bg-white/95 backdrop-blur-md rounded-2xl shadow-2xl border border-white/20 z-50 overflow-hidden">
+                <div className="py-2">
+                  <button
+                    onClick={() => {
+                      setCurrentView('home');
+                      setIsMenuOpen(false);
+                    }}
+                    className="w-full text-left px-6 py-4 hover:bg-gradient-to-r hover:from-blue-50 hover:to-indigo-50 transition-all duration-200 flex items-center gap-3 group"
+                  >
+                    <span className="text-xl">🏠</span>
+                    <span className="font-medium text-slate-700 group-hover:text-blue-700">홈</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCurrentView('hamster');
+                      setIsMenuOpen(false);
+                    }}
+                    className="w-full text-left px-6 py-4 hover:bg-gradient-to-r hover:from-blue-50 hover:to-indigo-50 transition-all duration-200 flex items-center gap-3 group"
+                  >
+                    <span className="text-xl">🐹</span>
+                    <span className="font-medium text-slate-700 group-hover:text-blue-700 whitespace-nowrap">햄스터에게 물어보기</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCurrentView('restaurants');
+                      setIsMenuOpen(false);
+                    }}
+                    className="w-full text-left px-6 py-4 hover:bg-gradient-to-r hover:from-blue-50 hover:to-indigo-50 transition-all duration-200 flex items-center gap-3 group"
+                  >
+                    <span className="text-xl">🍽️</span>
+                    <span className="font-medium text-slate-700 group-hover:text-blue-700">전체식당보기</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCurrentView('board');
+                      setIsMenuOpen(false);
+                    }}
+                    className="w-full text-left px-6 py-4 hover:bg-gradient-to-r hover:from-blue-50 hover:to-indigo-50 transition-all duration-200 flex items-center gap-3 group"
+                  >
+                    <span className="text-xl">📝</span>
+                    <span className="font-medium text-slate-700 group-hover:text-blue-700">게시판</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 메인 콘텐츠 */}
+        {currentView === 'home' && renderHomeView()}
+        {currentView === 'hamster' && renderHamsterView()}
+        {currentView === 'restaurants' && renderRestaurantsView()}
+        {currentView === 'board' && (
+          <>
+            {selectedPost && <PostDetailView />}
+            {editingPost && <PostEditView />}
+            {!selectedPost && !editingPost && <BoardListView />}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
